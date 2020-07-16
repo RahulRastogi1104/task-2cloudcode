@@ -1,0 +1,157 @@
+provider "aws" {
+  region = "ap-south-1"
+  profile = "myrahul"
+}
+
+
+resource "tls_private_key" "task-2_key" {
+  algorithm = "RSA"
+  
+}
+resource "aws_key_pair" "keypair" {
+  key_name   = "task-2_key"
+  public_key = tls_private_key.task-2_key.public_key_openssh
+
+depends_on = [
+tls_private_key.task-2_key
+]
+}
+
+
+resource "aws_instance"  "task-2_instance" {
+  depends_on = [aws_security_group.sg_task-2,]
+  ami           = "ami-07a8c73a650069cf3"
+  instance_type = "t2.micro"
+  key_name	= aws_key_pair.keypair.key_name
+  security_groups =  [ "sg_task-2" ] 
+
+  tags = {
+    Name = "EC2-task2"
+  }
+
+provisioner "remote-exec"{
+  connection {
+    type     = "ssh"
+    user     = "ec2-user"
+    agent    = "false"
+    private_key = tls_private_key.task-2_key.private_key_pem
+    host     = aws_instance.task-2_instance.public_ip
+  }
+
+    inline = [
+      "sudo yum install httpd  php git -y",
+      "sudo systemctl restart httpd",
+      "sudo systemctl enable httpd",
+    ]
+  }
+
+}
+
+
+
+resource "aws_security_group" "sg_task-2" {
+  name        = "sg_task-2"
+  description = "Allow traffic"
+  
+
+  ingress {
+    description = "SSH"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+  description = "NFS"
+  from_port   = 2049
+  to_port     = 2049
+  protocol    = "tcp"
+  cidr_blocks = [ "0.0.0.0/0" ]
+  }
+
+ingress {
+    description = "HTTP"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "sg_for_EFS"
+  }
+}
+
+
+
+
+resource "aws_efs_file_system" "EFS" {
+  depends_on =  [ aws_security_group.sg_task-2 , aws_instance.task-2_instance ]
+  creation_token = "nfs"
+
+  tags = {
+    Name = " Elastic File System"
+  }
+}
+
+
+resource "aws_efs_mount_target" "efsmount" {
+  depends_on =  [ aws_efs_file_system.EFS, ]
+  file_system_id = aws_efs_file_system.EFS.id
+  subnet_id      = aws_instance.task-2_instance.subnet_id 
+  security_groups = ["${aws_security_group.sg_task-2.id}"]
+}
+
+
+
+output "EC2-instance-ip" {
+	value = aws_instance.task-2_instance.public_ip
+}
+
+
+
+
+//Connect to instance again
+resource "null_resource" "connection"  {
+
+
+	depends_on = [ aws_efs_mount_target.efsmount,]
+
+
+	connection {
+		type     = "ssh"
+		user     = "ec2-user"
+		private_key = tls_private_key.task-2_key.private_key_pem
+		host     = aws_instance.task-2_instance.public_ip
+	}	
+	
+// Mounting the EFS on the folder and pulling the code from github
+ provisioner "remote-exec" {
+      inline = [
+        "sudo echo ${aws_efs_file_system.EFS.dns_name}:/var/www/html efs defaults,_netdev 0 0 >> sudo /etc/fstab",
+        "sudo mount  ${aws_efs_file_system.EFS.dns_name}:/  /var/www/html",
+		"sudo git clone https://github.com/RahulRastogi1104/t3cloudhtml.git /var/www/html/"
+    ]
+  }
+}
+
+
+//Connect to the webserver to see the website
+resource "null_resource" "webpage-output"  {
+
+
+depends_on = [null_resource.connection,]
+
+
+	provisioner "local-exec" {
+	    command = "start chrome ${aws_instance.task-2_instance.public_ip}"
+  	}
+}
